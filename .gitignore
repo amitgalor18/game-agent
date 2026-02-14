@@ -1,0 +1,25 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Env and secrets
+.env
+.env.local
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE and debug
+.cursor/
+*.log
+debug.log
+
+# OS
+.DS_Store
+Thumbs.db
