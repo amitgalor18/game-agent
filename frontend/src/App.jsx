@@ -5,10 +5,12 @@ import {
   addKnight,
   createDragonSpot,
   createTarget,
+  createTrebuchet,
   deleteKnight,
   deleteTarget,
   deleteDragonSpot,
   resetSession,
+  setGameActive,
   transcribeAudio,
   chat,
 } from './api'
@@ -31,12 +33,13 @@ function nearestLocation(locations, gx, gy) {
   return best
 }
 
-function MapView({ state, onMapClick, onEntityClick }) {
+function MapView({ state, onMapClick, onEntityClick, fireBreathAtLocation }) {
   if (!state) return <div className="p-4">Loading…</div>
 
-  const { grid, locations, knights, dragon_spots, targets } = state
+  const { grid, locations, knights, dragon_spots, targets, trebuchets = [] } = state
   const w = grid?.width ?? GRID_W
   const h = grid?.height ?? GRID_H
+  const fireBreathLoc = fireBreathAtLocation && locations?.find((l) => l.name === fireBreathAtLocation)
 
   const handleMapClick = (e) => {
     const rect = e.currentTarget.getBoundingClientRect()
@@ -116,6 +119,32 @@ function MapView({ state, onMapClick, onEntityClick }) {
           }}
         />
       ))}
+
+      {/* Trebuchets */}
+      {trebuchets?.map((tr) => (
+        <TrebuchetMarker
+          key={tr.id}
+          trebuchet={tr}
+          blockPctX={blockPctX}
+          blockPctY={blockPctY}
+        />
+      ))}
+
+      {/* Fire-breath overlay when knight is killed */}
+      {fireBreathLoc && (
+        <motion.div
+          initial={{ opacity: 1, scale: 0.8 }}
+          animate={{ opacity: 1, scale: 1.2 }}
+          exit={{ opacity: 0 }}
+          className="absolute w-16 h-16 -ml-8 -mt-8 z-20 pointer-events-none"
+          style={{
+            left: `${blockPctX(fireBreathLoc.x)}%`,
+            top: `${blockPctY(fireBreathLoc.y)}%`,
+          }}
+        >
+          <img src="/assets/fire-breath.gif" alt="" className="w-full h-full object-contain" />
+        </motion.div>
+      )}
     </div>
   )
 }
@@ -217,6 +246,28 @@ function TargetMarker({ target, blockPctX, blockPctY, onClick }) {
   )
 }
 
+function TrebuchetMarker({ trebuchet, blockPctX, blockPctY }) {
+  return (
+    <motion.div
+      layout
+      initial={false}
+      animate={{
+        left: `${blockPctX(trebuchet.x)}%`,
+        top: `${blockPctY(trebuchet.y)}%`,
+      }}
+      className="absolute w-8 h-8 -ml-4 -mt-4 z-10 select-none pointer-events-none"
+      title={`Trebuchet at ${trebuchet.location}`}
+    >
+      <img
+        src="/assets/trebuchet.png"
+        alt="Trebuchet"
+        className="w-full h-full object-contain"
+        draggable={false}
+      />
+    </motion.div>
+  )
+}
+
 function ContextMenu({ x, y, items, onClose }) {
   return (
     <>
@@ -245,18 +296,48 @@ function ContextMenu({ x, y, items, onClose }) {
   )
 }
 
-function TopBar({ time, onReset }) {
+function TopBar({ time, onReset, gameActive, onGameActiveChange, trebuchetCooldown, musicMuted, onMusicMutedChange, onStartMusic }) {
   return (
-    <header className="flex items-center justify-between gap-4 py-3 px-4 bg-stone-800/80 border-b border-stone-600 rounded-t-lg">
+    <header className="flex items-center justify-between gap-4 py-3 px-4 bg-stone-800/80 border-b border-stone-600 rounded-t-lg flex-wrap">
       <h1 className="text-lg font-semibold text-stone-100 truncate">{"Knights & Nodes - A Voice Controlled C&C Demo"}</h1>
-      <span className="text-sm text-stone-400 tabular-nums">{time}</span>
-      <button
-        type="button"
-        onClick={onReset}
-        className="px-3 py-1.5 text-sm font-medium rounded bg-stone-600 text-stone-200 hover:bg-stone-500"
-      >
-        Reset session
-      </button>
+      <div className="flex items-center gap-3">
+        {trebuchetCooldown > 0 && (
+          <span className="flex items-center gap-1.5 px-2 py-1 rounded bg-amber-900/80 text-amber-200 text-sm" title="Trebuchet cooldown">
+            <span className="text-base" aria-hidden>⏱</span>
+            <span className="tabular-nums font-medium">{trebuchetCooldown}</span>
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => {
+            if (musicMuted && gameActive) onStartMusic?.(true)
+            onMusicMutedChange(!musicMuted)
+          }}
+          className={`px-2.5 py-1.5 text-sm font-medium rounded ${musicMuted ? 'bg-stone-700 text-stone-500' : 'bg-stone-600 text-stone-200 hover:bg-stone-500'}`}
+          title={musicMuted ? 'Unmute music' : 'Mute music'}
+          aria-label={musicMuted ? 'Unmute music' : 'Mute music'}
+        >
+          <span className="text-lg" aria-hidden>{musicMuted ? '🔇' : '🎵'}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (!gameActive) onStartMusic?.()
+            onGameActiveChange(!gameActive)
+          }}
+          className={`px-3 py-1.5 text-sm font-medium rounded ${gameActive ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-stone-600 text-stone-200 hover:bg-stone-500'}`}
+        >
+          {gameActive ? 'Simulation ON' : 'Start Game'}
+        </button>
+        <span className="text-sm text-stone-400 tabular-nums">{time}</span>
+        <button
+          type="button"
+          onClick={onReset}
+          className="px-3 py-1.5 text-sm font-medium rounded bg-stone-600 text-stone-200 hover:bg-stone-500"
+        >
+          Reset session
+        </button>
+      </div>
     </header>
   )
 }
@@ -364,6 +445,26 @@ function StateTables({ state, activeTab, onTabChange }) {
   )
 }
 
+function TurnLog({ turnLogs = [] }) {
+  const endRef = useRef(null)
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [turnLogs.length])
+  return (
+    <div className="flex flex-col gap-1 min-h-0">
+      <label className="text-xs font-medium text-stone-400">Turn log</label>
+      <div className="flex-1 min-h-[80px] max-h-32 overflow-y-auto rounded border border-stone-600 bg-stone-900 px-2 py-1.5 text-xs text-stone-300 font-mono">
+        {turnLogs.length === 0 ? (
+          <span className="text-stone-500">(no events yet)</span>
+        ) : (
+          turnLogs.map((line, i) => <div key={i}>{line}</div>)
+        )}
+        <div ref={endRef} />
+      </div>
+    </div>
+  )
+}
+
 function RightPanel({
   transcription,
   llmResult,
@@ -373,6 +474,7 @@ function RightPanel({
   state,
   tableTab,
   onTableTabChange,
+  turnLogs,
 }) {
   return (
     <aside className="flex flex-col w-full max-w-md bg-stone-800/90 border border-stone-600 rounded-lg overflow-hidden">
@@ -389,6 +491,9 @@ function RightPanel({
         >
           {isRecording ? 'Recording…' : 'Hold to talk'}
         </button>
+      </div>
+      <div className="p-3 border-b border-stone-600 flex flex-col gap-2">
+        <TurnLog turnLogs={turnLogs} />
       </div>
       <div className="p-3 border-b border-stone-600 flex flex-col gap-2">
         <label className="text-xs font-medium text-stone-400">Transcription</label>
@@ -418,6 +523,8 @@ function RightPanel({
   )
 }
 
+const MUSIC_TRACKS = ['/assets/You_Meet_in_a_Tavern.mp3', '/assets/Quiet_Hearth.mp3']
+
 export default function App() {
   const [state, setState] = useState(null)
   const [menu, setMenu] = useState(null)
@@ -426,8 +533,15 @@ export default function App() {
   const [llmResult, setLlmResult] = useState('')
   const [isRecording, setIsRecording] = useState(false)
   const [tableTab, setTableTab] = useState('Knights')
+  const [musicMuted, setMusicMuted] = useState(false)
+  const [fireBreathAtLocation, setFireBreathAtLocation] = useState(null)
   const recorderRef = useRef(null)
   const chunksRef = useRef([])
+  const musicRef = useRef(null)
+  const musicIndexRef = useRef(0)
+  const gameActiveRef = useRef(false)
+  const musicMutedRef = useRef(false)
+  const sfxRef = useRef(null)
 
   const loadState = useCallback(async () => {
     try {
@@ -449,6 +563,65 @@ export default function App() {
     return () => clearInterval(id)
   }, [loadState])
 
+  // One-shot effect sounds and fire-breath overlay (no cleanup so timeout always runs and hides gif)
+  useEffect(() => {
+    if (!state?.effect_knight_killed_at) return
+    setFireBreathAtLocation(state.effect_knight_killed_at)
+    setTimeout(() => setFireBreathAtLocation(null), 2200)
+    if (!sfxRef.current) sfxRef.current = new Audio()
+    sfxRef.current.src = '/assets/dragon-slays-knight.mp3'
+    sfxRef.current.play().catch(() => {})
+  }, [state?.effect_knight_killed_at])
+  useEffect(() => {
+    if (!state?.effect_dragon_killed_by_knight_at) return
+    if (!sfxRef.current) sfxRef.current = new Audio()
+    sfxRef.current.src = '/assets/sword_slice.mp3'
+    sfxRef.current.play().catch(() => {})
+  }, [state?.effect_dragon_killed_by_knight_at])
+  useEffect(() => {
+    if (!state?.effect_dragon_killed_by_artillery_at) return
+    if (!sfxRef.current) sfxRef.current = new Audio()
+    sfxRef.current.src = '/assets/mortar_hit.mp3'
+    sfxRef.current.play().catch(() => {})
+  }, [state?.effect_dragon_killed_by_artillery_at])
+
+  // Background music: start only from user gesture (click Start Game or Unmute); useEffect only stops when game off or muted
+  gameActiveRef.current = state?.game_active ?? false
+  musicMutedRef.current = musicMuted
+
+  const startMusic = useCallback((forceStart = false) => {
+    if (!forceStart && musicMutedRef.current) return
+    if (forceStart) musicMutedRef.current = false
+    gameActiveRef.current = true
+    if (!musicRef.current) musicRef.current = new Audio()
+    const audio = musicRef.current
+    const playNext = () => {
+      if (!gameActiveRef.current || musicMutedRef.current) {
+        audio.pause()
+        return
+      }
+      const idx = musicIndexRef.current % MUSIC_TRACKS.length
+      audio.src = MUSIC_TRACKS[idx]
+      musicIndexRef.current += 1
+      audio.onended = playNext
+      audio.play().catch((e) => {
+        console.warn('Music play failed:', e?.name || e)
+      })
+    }
+    musicIndexRef.current = 0
+    playNext()
+  }, [])
+
+  useEffect(() => {
+    if (!musicRef.current) musicRef.current = new Audio()
+    const audio = musicRef.current
+    if (!gameActiveRef.current || musicMutedRef.current) {
+      audio.pause()
+      audio.currentTime = 0
+      audio.onended = null
+    }
+  }, [state?.game_active, musicMuted])
+
   const handleReset = useCallback(async () => {
     try {
       await resetSession()
@@ -459,6 +632,20 @@ export default function App() {
       console.error(e)
     }
   }, [loadState])
+
+  const handleGameActiveChange = useCallback(async (active) => {
+    try {
+      await setGameActive(active)
+      loadState()
+    } catch (e) {
+      console.error(e)
+    }
+  }, [loadState])
+
+  const handleMusicMutedChange = useCallback((muted) => {
+    setMusicMuted(muted)
+    if (!muted && (state?.game_active)) startMusic()
+  }, [state?.game_active, startMusic])
 
   const startRecording = useCallback(async () => {
     try {
@@ -509,23 +696,31 @@ export default function App() {
 
   const handleMapClick = (location, screenPos) => {
     if (!location) return
+    const trebuchetAvailable = state?.trebuchet_available !== false
+    const items = [
+      {
+        label: `Spawn Knight at ${location.name}`,
+        action: () => addKnight(location.name).then(loadState),
+      },
+      {
+        label: `Spawn Dragon at ${location.name}`,
+        action: () => createDragonSpot(location.name).then(loadState),
+      },
+      {
+        label: `Spawn Target at ${location.name}`,
+        action: () => createTarget(location.name).then(loadState),
+      },
+    ]
+    if (trebuchetAvailable) {
+      items.push({
+        label: `Build Trebuchet at ${location.name}`,
+        action: () => createTrebuchet(location.name).then(loadState),
+      })
+    }
     setMenu({
       x: screenPos.x,
       y: screenPos.y,
-      items: [
-        {
-          label: `Spawn Knight at ${location.name}`,
-          action: () => addKnight(location.name).then(loadState),
-        },
-        {
-          label: `Spawn Dragon at ${location.name}`,
-          action: () => createDragonSpot(location.name).then(loadState),
-        },
-        {
-          label: `Spawn Target at ${location.name}`,
-          action: () => createTarget(location.name).then(loadState),
-        },
-      ],
+      items,
     })
   }
 
@@ -557,15 +752,30 @@ export default function App() {
     }
   }
 
+  const gameActive = state?.game_active ?? false
+  const turnLogs = state?.turn_logs ?? []
+  const trebuchetCooldown = state?.trebuchet_cooldown ?? 0
+  const defeat = state?.knights?.length === 0
+
   return (
     <div className="min-h-screen bg-stone-900 text-stone-100 flex flex-col">
-      <TopBar time={time} onReset={handleReset} />
+      <TopBar
+        time={time}
+        onReset={handleReset}
+        gameActive={gameActive}
+        onGameActiveChange={handleGameActiveChange}
+        onStartMusic={startMusic}
+        trebuchetCooldown={trebuchetCooldown}
+        musicMuted={musicMuted}
+        onMusicMutedChange={handleMusicMutedChange}
+      />
       <div className="flex-1 flex gap-4 p-4 min-h-0 overflow-hidden">
         <div className="flex-1 min-w-0 flex flex-col">
           <MapView
             state={state}
             onMapClick={handleMapClick}
             onEntityClick={handleEntityClick}
+            fireBreathAtLocation={fireBreathAtLocation}
           />
         </div>
         <div className="flex-shrink-0 flex flex-col min-h-0 w-80">
@@ -578,6 +788,7 @@ export default function App() {
             state={state}
             tableTab={tableTab}
             onTableTabChange={setTableTab}
+            turnLogs={turnLogs}
           />
         </div>
       </div>
@@ -589,6 +800,33 @@ export default function App() {
           onClose={() => setMenu(null)}
         />
       )}
+      <AnimatePresence>
+        {defeat && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-stone-800 border-2 border-red-600 rounded-xl p-8 text-center shadow-2xl"
+            >
+              <h2 className="text-3xl font-bold text-red-500 mb-2">DEFEAT</h2>
+              <p className="text-stone-300 mb-4">All knights have fallen.</p>
+              <button
+                type="button"
+                onClick={() => handleReset().then(() => loadState())}
+                className="px-4 py-2 bg-stone-600 text-stone-100 rounded hover:bg-stone-500"
+              >
+                Reset & try again
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

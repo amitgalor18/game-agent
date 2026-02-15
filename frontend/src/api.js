@@ -80,6 +80,26 @@ export async function resetSession() {
   return res.json();
 }
 
+export async function setGameActive(gameActive) {
+  const res = await fetch(`${API_BASE}/set_game_active`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ game_active: gameActive }),
+  });
+  if (!res.ok) throw new Error(res.statusText);
+  return res.json();
+}
+
+export async function createTrebuchet(location_name) {
+  const res = await fetch(`${API_BASE}/create_trebuchet`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ location_name }),
+  });
+  if (!res.ok) throw new Error(res.statusText);
+  return res.json();
+}
+
 /** @param {Blob} audioBlob */
 export async function transcribeAudio(audioBlob) {
   const form = new FormData();

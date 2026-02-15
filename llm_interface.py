@@ -103,6 +103,24 @@ def _tools_schema() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "create_trebuchet",
+                "description": "Build a trebuchet at a location. Only one trebuchet at a time; fails if one exists or cooldown is active (after firing artillery).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location_name": {
+                            "type": "string",
+                            "description": "Location name to build the trebuchet at.",
+                            "enum": LOCATION_NAMES,
+                        },
+                    },
+                    "required": ["location_name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "create_target",
                 "description": "Create a target. Optionally link it to a dragon spot (then location comes from that spot).",
                 "parameters": {
@@ -220,7 +238,8 @@ You will be given the current game state with entity ids. You MUST use those exa
 - move_knight(to_location_name, knight_name optional): use a location name from the list (North Ridge, Castle, River Crossing, Forest Edge, Mountain Pass, Village, Tower, Bridge).
 - create_dragon_spot(location_name, dragon_type)
 - create_target(location_name optional, linked_dragon_spot_id optional): to link to a dragon, use its id from the state; then omit location_name (target gets that spot's location). Pick the linked dragon by the type of dragon mentioned in the user's command.
-- attack_target(target_id, attack_method): target_id can be a target id OR a dragon_spot id (e.g. when user says "attack the dragon" use the dragon spot id from the state). If attack_method is "knight", only call when a knight is at the same location as the target (otherwise use "artillery" or ask to move the knight first). Attack with knight can also hint at the desired target when no description is provided, if the knight is at the same location as one of the targets, it will attack that target.
+- create_trebuchet(location_name): build a trebuchet at a location. Only one at a time; fails if cooldown > 0 or one already exists (after firing artillery, cooldown is 3 turns).
+- attack_target(target_id, attack_method): target_id can be a target id OR a dragon_spot id (e.g. when user says "attack the dragon" use the dragon spot id from the state). If attack_method is "knight", only call when a knight is at the same location as the target (otherwise use "artillery" or ask to move the knight first). Artillery consumes the trebuchet and starts a 3-turn cooldown. Attack with knight can also hint at the desired target when no description is provided, if the knight is at the same location as one of the targets, it will attack that target.
 - delete_target(target_id)
 - delete_dragon_spot(dragon_spot_id)
 
@@ -240,6 +259,12 @@ def format_state_for_llm(snapshot: dict) -> str:
         lines.append(f"Dragon spot: id={d['id']} location={d['location']} type={d['type']} status={d['status']}")
     if not snapshot.get("dragon_spots"):
         lines.append("Dragon spots: (none)")
+    for t in snapshot.get("trebuchets", []):
+        lines.append(f"Trebuchet: id={t['id']} location={t['location']}")
+    if not snapshot.get("trebuchets"):
+        cooldown = snapshot.get("trebuchet_cooldown", 0)
+        avail = snapshot.get("trebuchet_available", True)
+        lines.append(f"Trebuchet: (none) cooldown={cooldown} available={avail}")
     for t in snapshot.get("targets", []):
         link = f" linked_dragon_spot_id={t['linked_dragon_spot_id']}" if t.get("linked_dragon_spot_id") else ""
         lines.append(f"Target: id={t['id']} location={t['location']}{link} status={t['status']}")

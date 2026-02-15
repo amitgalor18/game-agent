@@ -1,10 +1,11 @@
 """
 Game State — The State Machine.
-Manages locations, knights, dragon spots, and targets for the voice-controlled map.
+Manages locations, knights, dragon spots, targets, and simulation (turns, trebuchet, enemy AI).
 """
 
 from __future__ import annotations
 
+import random
 import uuid
 from enum import Enum
 from typing import Any
@@ -40,6 +41,7 @@ def _make_knight(name: str, location_name: str) -> dict[str, Any]:
         "name": name,
         "location": location_name,
         "coordinates": coords,
+        "grace_turn": False,
     }
 
 
@@ -66,6 +68,15 @@ def _make_target(
     }
 
 
+def _make_trebuchet(location_name: str) -> dict[str, Any]:
+    coords = LOCATIONS.get(location_name, (0, 0))
+    return {
+        "id": f"trebuchet-{uuid.uuid4().hex[:8]}",
+        "location": location_name,
+        "coordinates": coords,
+    }
+
+
 # ---------------------------------------------------------------------------
 # GameMap — single source of truth for map state.
 # ---------------------------------------------------------------------------
@@ -83,6 +94,16 @@ class GameMap:
         self._knights: list[dict[str, Any]] = []
         self._dragon_spots: list[dict[str, Any]] = []
         self._targets: list[dict[str, Any]] = []
+        self._trebuchets: list[dict[str, Any]] = []
+        # Simulation mode
+        self.game_active: bool = False
+        self.turn_count: int = 0
+        self.trebuchet_cooldown: int = 0
+        self.turn_logs: list[str] = []
+        # One-shot effect flags for frontend (cleared after sent in /state)
+        self._effect_knight_killed_at: str | None = None
+        self._effect_dragon_killed_by_knight_at: str | None = None
+        self._effect_dragon_killed_by_artillery_at: str | None = None
 
     def _resolve_location(self, location_name: str) -> tuple[int, int]:
         for k, v in self._locations.items():
@@ -101,7 +122,8 @@ class GameMap:
 
     # ---------- Knights ----------
     def move_knight(self, to_location_name: str, knight_name: str | None = None) -> str:
-        """Move a knight to a named location. If knight_name is None, move the first knight."""
+        """Move a knight to a named location. If knight_name is None, move the first knight.
+        Sets grace_turn on the moved knight so they get one turn at a dragon location before dying."""
         if not self._knights:
             return "No knights on the map. Create a knight first."
         canonical = self._canonical_location_name(to_location_name)
@@ -111,10 +133,12 @@ class GameMap:
                 if k["name"].lower() == knight_name.lower():
                     k["location"] = canonical
                     k["coordinates"] = coords
+                    k["grace_turn"] = True
                     return f"Moved knight '{k['name']}' to {canonical}."
             return f"No knight named '{knight_name}' found."
         self._knights[0]["location"] = canonical
         self._knights[0]["coordinates"] = coords
+        self._knights[0]["grace_turn"] = True
         return f"Moved knight '{self._knights[0]['name']}' to {canonical}."
 
     def add_knight(self, name: str, location_name: str = "Castle") -> str:
@@ -149,6 +173,24 @@ class GameMap:
                 self._dragon_spots.pop(i)
                 return f"Removed dragon spot {dragon_spot_id}."
         return f"Dragon spot {dragon_spot_id} not found."
+
+    # ---------- Trebuchet ----------
+    @property
+    def trebuchet_available(self) -> bool:
+        """True if cooldown is 0 and no trebuchet exists on the map."""
+        return self.trebuchet_cooldown == 0 and len(self._trebuchets) == 0
+
+    def create_trebuchet(self, location_name: str) -> str:
+        """Add a trebuchet at a location. Only one allowed; fails if cooldown > 0 or one exists."""
+        if self.trebuchet_cooldown > 0:
+            return f"Cannot build trebuchet: cooldown active ({self.trebuchet_cooldown} turns remaining)."
+        if self._trebuchets:
+            return "Cannot build trebuchet: one already exists. Use artillery to fire it, then wait for cooldown."
+        canonical = self._canonical_location_name(location_name)
+        treb = _make_trebuchet(canonical)
+        treb["coordinates"] = self._resolve_location(location_name)
+        self._trebuchets.append(treb)
+        return f"Built trebuchet at {canonical}."
 
     # ---------- Targets ----------
     def create_target(
@@ -236,6 +278,15 @@ class GameMap:
                     f"Cannot attack with knight: no knight at {t['location']}. "
                     "Move a knight there first or use artillery."
                 )
+            if method == AttackMethod.ARTILLERY:
+                if not self._trebuchets:
+                    return "Cannot attack with artillery: no trebuchet on the map. Build one first (when cooldown allows)."
+                # Consume trebuchet and set cooldown (3 turns)
+                self._trebuchets.clear()
+                self.trebuchet_cooldown = 3
+                self._effect_dragon_killed_by_artillery_at = t["location"]
+            elif method == AttackMethod.KNIGHT:
+                self._effect_dragon_killed_by_knight_at = t["location"]
             self._neutralize_target(t)
         return f"Target(s) neutralized ({method.value})."
 
@@ -247,6 +298,90 @@ class GameMap:
                 return f"Removed target {target_id}."
         return f"Target {target_id} not found."
 
+    # ---------- Simulation: enemy turn ----------
+    def _other_locations(self, location_name: str) -> list[str]:
+        """Return all other location names (no distance limit)."""
+        return [n for n in self._locations if n != location_name]
+
+    def process_enemy_turn(self) -> None:
+        """
+        Run only when game_active is True. Called after every successful user tool call.
+        - Dragon movement: 50% chance to move non-locked dragons to a random other location (no distance limit).
+        - Dragon combat: if dragon at same location as knight -> kill knight only if knight has no grace_turn
+          (knight gets 1 turn grace after moving there; if they don't attack or another dragon arrives, they die).
+        - Spawn: 30% chance to spawn a new dragon at a random non-Castle location.
+        - Decrement trebuchet_cooldown by 1 (min 0).
+        """
+        if not self.game_active:
+            return
+        self.turn_count += 1
+        self._log(f"--- Turn {self.turn_count} ---")
+
+        # Dragons linked to a target are "locked"
+        locked_dragon_ids = {t["linked_dragon_spot_id"] for t in self._targets if t.get("linked_dragon_spot_id") and t.get("status") == "active"}
+
+        # Dragon movement (any other location, no distance limit)
+        for d in list(self._dragon_spots):
+            if d.get("status") != "active":
+                continue
+            if d["id"] in locked_dragon_ids:
+                continue
+            if random.random() >= 0.5:
+                continue
+            others = self._other_locations(d["location"])
+            if not others:
+                continue
+            new_loc = random.choice(others)
+            d["location"] = new_loc
+            d["coordinates"] = self._resolve_location(new_loc)
+            self._log(f"Dragon moved to {new_loc}.")
+
+        # Dragon combat: knight at dragon location dies only if no grace_turn (1-turn grace after moving there)
+        for d in self._dragon_spots:
+            if d.get("status") != "active":
+                continue
+            loc = d["location"]
+            for k in list(self._knights):
+                if k["location"] == loc and not k.get("grace_turn"):
+                    self._knights.remove(k)
+                    self._effect_knight_killed_at = loc
+                    self._log(f"Knight killed at {loc}!")
+
+        # Clear grace_turn so next enemy turn they can die if still at dragon location
+        for k in self._knights:
+            k["grace_turn"] = False
+
+        # Spawning: 30% chance new dragon at random location (except Castle)
+        spawn_locs = [n for n in self._locations if n != "Castle"]
+        if spawn_locs and random.random() < 0.30:
+            loc = random.choice(spawn_locs)
+            spot = _make_dragon_spot(loc, "fire")
+            spot["coordinates"] = self._resolve_location(loc)
+            self._dragon_spots.append(spot)
+            self._log(f"Dragon spawned at {loc}.")
+
+        # Cooldowns
+        if self.trebuchet_cooldown > 0:
+            self.trebuchet_cooldown -= 1
+
+    def _log(self, message: str) -> None:
+        """Append a message to turn_logs (keep last 100)."""
+        self.turn_logs.append(message)
+        if len(self.turn_logs) > 100:
+            self.turn_logs = self.turn_logs[-100:]
+
+    def log_player_action(self, message: str) -> None:
+        """Record a player action in the turn log (for UI)."""
+        self._log(message)
+
+    def set_game_active(self, active: bool) -> None:
+        """Turn simulation mode on or off."""
+        self.game_active = active
+        if not active:
+            self._log("Game paused (sandbox mode).")
+        else:
+            self._log("Game started (simulation mode).")
+
     # ---------- Snapshot for display ----------
     def snapshot(self) -> dict[str, Any]:
         """Return a JSON-friendly snapshot of current state (no methods)."""
@@ -255,4 +390,10 @@ class GameMap:
             "knights": [dict(k) for k in self._knights],
             "dragon_spots": [dict(d) for d in self._dragon_spots],
             "targets": [dict(t) for t in self._targets],
+            "trebuchets": [dict(t) for t in self._trebuchets],
+            "game_active": self.game_active,
+            "turn_count": self.turn_count,
+            "trebuchet_cooldown": self.trebuchet_cooldown,
+            "trebuchet_available": self.trebuchet_available,
+            "turn_logs": list(self.turn_logs),
         }

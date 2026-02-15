@@ -64,6 +64,11 @@ def _placement_offset(entity_id: str) -> tuple[float, float]:
 def _state_for_api() -> dict:
     """Build API state with (x, y) on every entity for the frontend grid."""
     snap = game.snapshot()
+    game_active = snap.get("game_active", False)
+    turn_count = snap.get("turn_count", 0)
+    trebuchet_cooldown = snap.get("trebuchet_cooldown", 0)
+    trebuchet_available = snap.get("trebuchet_available", True)
+    turn_logs = snap.get("turn_logs", [])
     # snapshot["locations"] is a list of location names; resolve to (x,y) from LOCATIONS
     location_names = snap.get("locations", [])
     locations = [{"name": n, "x": LOCATIONS.get(n, (0, 0))[0], "y": LOCATIONS.get(n, (0, 0))[1]} for n in location_names]
@@ -87,6 +92,7 @@ def _state_for_api() -> dict:
 
     knights = with_xy(snap.get("knights", []), add_noise=True)
     dragon_spots = with_xy(snap.get("dragon_spots", []), add_noise=True)
+    trebuchets = with_xy(snap.get("trebuchets", []), add_noise=True)
     # Dragon display position (with noise) so linked targets can match exactly
     dragon_display_by_id = {d["id"]: (d["x"], d["y"]) for d in dragon_spots}
     # Targets linked to a dragon: exact dragon *display* location (no noise); others: add noise
@@ -108,12 +114,29 @@ def _state_for_api() -> dict:
             ent["y"] = y + dy
         targets.append(ent)
 
+    # One-shot effects for frontend (clear after sending)
+    effect_knight_killed_at = getattr(game, "_effect_knight_killed_at", None)
+    effect_dragon_killed_by_knight_at = getattr(game, "_effect_dragon_killed_by_knight_at", None)
+    effect_dragon_killed_by_artillery_at = getattr(game, "_effect_dragon_killed_by_artillery_at", None)
+    game._effect_knight_killed_at = None
+    game._effect_dragon_killed_by_knight_at = None
+    game._effect_dragon_killed_by_artillery_at = None
+
     return {
         "grid": {"width": 55, "height": 30},
         "locations": locations if locations else [{"name": n, "x": xy[0], "y": xy[1]} for n, xy in LOCATIONS.items()],
         "knights": knights,
         "dragon_spots": dragon_spots,
         "targets": targets,
+        "trebuchets": trebuchets,
+        "game_active": game_active,
+        "turn_count": turn_count,
+        "trebuchet_cooldown": trebuchet_cooldown,
+        "trebuchet_available": trebuchet_available,
+        "turn_logs": turn_logs,
+        "effect_knight_killed_at": effect_knight_killed_at,
+        "effect_dragon_killed_by_knight_at": effect_dragon_killed_by_knight_at,
+        "effect_dragon_killed_by_artillery_at": effect_dragon_killed_by_artillery_at,
     }
 
 
@@ -142,45 +165,68 @@ class IdBody(BaseModel):
     id: str
 
 
+class SetGameActiveBody(BaseModel):
+    game_active: bool
+
+
+class CreateTrebuchetBody(BaseModel):
+    location_name: str
+
+
 class ChatBody(BaseModel):
     user_text: str
+
+
+def _after_player_action() -> None:
+    """Run enemy turn after a successful player action when simulation is active."""
+    if game.game_active:
+        game.process_enemy_turn()
 
 
 def _execute_tool(name: str, arguments: dict) -> str:
     """Run the corresponding GameMap method; return result message."""
     try:
+        result = None
         if name == "move_knight":
-            return game.move_knight(
+            result = game.move_knight(
                 to_location_name=arguments["to_location_name"],
                 knight_name=arguments.get("knight_name"),
             )
-        if name == "add_knight":
-            return game.add_knight(
+        elif name == "add_knight":
+            result = game.add_knight(
                 name=arguments.get("name", "Knight"),
                 location_name=arguments.get("location_name", "Castle"),
             )
-        if name == "delete_knight":
-            return game.delete_knight(knight_id=arguments["knight_id"])
-        if name == "create_dragon_spot":
-            return game.create_dragon_spot(
+        elif name == "delete_knight":
+            result = game.delete_knight(knight_id=arguments["knight_id"])
+        elif name == "create_dragon_spot":
+            result = game.create_dragon_spot(
                 location_name=arguments["location_name"],
                 dragon_type=arguments["dragon_type"],
             )
-        if name == "create_target":
-            return game.create_target(
+        elif name == "create_target":
+            result = game.create_target(
                 location_name=arguments.get("location_name"),
                 linked_dragon_spot_id=arguments.get("linked_dragon_spot_id"),
             )
-        if name == "attack_target":
-            return game.attack_target(
+        elif name == "create_trebuchet":
+            result = game.create_trebuchet(location_name=arguments["location_name"])
+        elif name == "attack_target":
+            result = game.attack_target(
                 target_id=arguments["target_id"],
                 attack_method=arguments["attack_method"],
             )
-        if name == "delete_target":
-            return game.delete_target(target_id=arguments["target_id"])
-        if name == "delete_dragon_spot":
-            return game.delete_dragon_spot(dragon_spot_id=arguments["dragon_spot_id"])
-        return f"Unknown tool: {name}"
+        elif name == "delete_target":
+            result = game.delete_target(target_id=arguments["target_id"])
+        elif name == "delete_dragon_spot":
+            result = game.delete_dragon_spot(dragon_spot_id=arguments["dragon_spot_id"])
+        else:
+            return f"Unknown tool: {name}"
+        # Log player action and run enemy turn only after a successful state-changing tool
+        if result and not result.startswith("Error:") and not result.startswith("No ") and "not found" not in result and "Cannot " not in result:
+            game.log_player_action(result)
+            _after_player_action()
+        return result
     except Exception as e:
         return f"Error: {e}"
 
@@ -194,24 +240,34 @@ def get_state():
 @app.post("/move_knight")
 def move_knight(body: MoveKnightBody):
     msg = game.move_knight(to_location_name=body.to_location_name, knight_name=body.knight_name)
+    if msg and "not found" not in msg and "No " not in msg:
+        game.log_player_action(msg)
+        _after_player_action()
     return {"message": msg}
 
 
 @app.post("/add_knight")
 def add_knight(location_name: str, name: str = "Knight"):
     msg = game.add_knight(name=name, location_name=location_name)
+    game.log_player_action(msg)
+    _after_player_action()
     return {"message": msg}
 
 
 @app.post("/delete_knight")
 def delete_knight(body: IdBody):
     msg = game.delete_knight(body.id)
+    if msg and "not found" not in msg:
+        game.log_player_action(msg)
+        _after_player_action()
     return {"message": msg}
 
 
 @app.post("/create_dragon_spot")
 def create_dragon_spot(body: CreateDragonSpotBody):
     msg = game.create_dragon_spot(location_name=body.location_name, dragon_type=body.dragon_type)
+    game.log_player_action(msg)
+    _after_player_action()
     return {"message": msg}
 
 
@@ -221,25 +277,51 @@ def create_target(body: CreateTargetBody):
         location_name=body.location_name,
         linked_dragon_spot_id=body.linked_dragon_spot_id,
     )
+    game.log_player_action(msg)
+    _after_player_action()
+    return {"message": msg}
+
+
+@app.post("/create_trebuchet")
+def create_trebuchet(body: CreateTrebuchetBody):
+    msg = game.create_trebuchet(location_name=body.location_name)
+    if msg and "Cannot " not in msg:
+        game.log_player_action(msg)
+        _after_player_action()
     return {"message": msg}
 
 
 @app.post("/attack_target")
 def attack_target(body: AttackTargetBody):
     msg = game.attack_target(target_id=body.target_id, attack_method=body.attack_method)
+    if msg and "not found" not in msg and "Cannot " not in msg:
+        game.log_player_action(msg)
+        _after_player_action()
     return {"message": msg}
 
 
 @app.post("/delete_target")
 def delete_target(body: IdBody):
     msg = game.delete_target(body.id)
+    if msg and "not found" not in msg:
+        game.log_player_action(msg)
+        _after_player_action()
     return {"message": msg}
 
 
 @app.post("/delete_dragon_spot")
 def delete_dragon_spot(body: IdBody):
     msg = game.delete_dragon_spot(body.id)
+    if msg and "not found" not in msg:
+        game.log_player_action(msg)
+        _after_player_action()
     return {"message": msg}
+
+
+@app.post("/set_game_active")
+def set_game_active(body: SetGameActiveBody):
+    game.set_game_active(body.game_active)
+    return {"message": "Game " + ("started" if body.game_active else "paused") + "."}
 
 
 @app.post("/reset")
@@ -337,6 +419,7 @@ _TOOL_PARAM_ORDER: dict[str, list[str]] = {
     "add_knight": ["name", "location_name"],
     "create_dragon_spot": ["location_name", "dragon_type"],
     "create_target": ["location_name", "linked_dragon_spot_id"],
+    "create_trebuchet": ["location_name"],
     "attack_target": ["target_id", "attack_method"],
     "delete_target": ["target_id"],
     "delete_dragon_spot": ["dragon_spot_id"],
