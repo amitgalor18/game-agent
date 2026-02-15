@@ -20,6 +20,8 @@ _whisper_model = None
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
 # Smaller/faster model: set WHISPER_MODEL=distil-large-v3 (or base, small) for speed.
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
+# Offline bundle: set WHISPER_DOWNLOAD_ROOT to vendor/whisper_models so models load from there.
+WHISPER_DOWNLOAD_ROOT = os.environ.get("WHISPER_DOWNLOAD_ROOT", None)
 
 # PTT recording state
 _ptt_chunks: list[bytes] = []
@@ -122,7 +124,10 @@ def _get_whisper_model(
         dev = device if device is not None else WHISPER_DEVICE
         # int8 is much faster on CPU with minimal quality loss; use default on GPU.
         ct = compute_type if compute_type is not None else ("int8" if dev == "cpu" else "default")
-        _whisper_model = WhisperModel(size, device=dev, compute_type=ct)
+        kwargs = {"device": dev, "compute_type": ct}
+        if WHISPER_DOWNLOAD_ROOT and os.path.isdir(WHISPER_DOWNLOAD_ROOT):
+            kwargs["download_root"] = WHISPER_DOWNLOAD_ROOT
+        _whisper_model = WhisperModel(size, **kwargs)
     return _whisper_model
 
 

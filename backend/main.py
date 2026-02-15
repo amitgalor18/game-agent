@@ -5,8 +5,11 @@ Holds the GameMap state and exposes REST endpoints for the frontend and orchestr
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,6 +49,18 @@ def _coords(e: dict) -> tuple[int, int]:
     return LOCATIONS.get(loc, (0, 0))
 
 
+# Pixel noise range in grid units so icons at same location don't fully overlap
+_PLACEMENT_NOISE = 1.2
+
+
+def _placement_offset(entity_id: str) -> tuple[float, float]:
+    """Stable offset per entity (from id hash) so the same entity always gets the same noise."""
+    b = hashlib.md5(entity_id.encode()).digest()
+    dx = (b[0] / 127.5 - 1.0) * _PLACEMENT_NOISE
+    dy = (b[1] / 127.5 - 1.0) * _PLACEMENT_NOISE
+    return (dx, dy)
+
+
 def _state_for_api() -> dict:
     """Build API state with (x, y) on every entity for the frontend grid."""
     snap = game.snapshot()
@@ -55,10 +70,13 @@ def _state_for_api() -> dict:
     if not locations:
         locations = [{"name": n, "x": xy[0], "y": xy[1]} for n, xy in LOCATIONS.items()]
 
-    def with_xy(entities: list, key: str = "coordinates"):
+    def with_xy(entities: list, key: str = "coordinates", add_noise: bool = True):
         out = []
         for e in entities:
             x, y = _coords(e)
+            if add_noise:
+                dx, dy = _placement_offset(e.get("id", ""))
+                x, y = x + dx, y + dy
             ent = dict(e)
             if key in ent:
                 del ent[key]
@@ -67,9 +85,28 @@ def _state_for_api() -> dict:
             out.append(ent)
         return out
 
-    knights = with_xy(snap.get("knights", []))
-    dragon_spots = with_xy(snap.get("dragon_spots", []))
-    targets = with_xy(snap.get("targets", []))
+    knights = with_xy(snap.get("knights", []), add_noise=True)
+    dragon_spots = with_xy(snap.get("dragon_spots", []), add_noise=True)
+    # Dragon display position (with noise) so linked targets can match exactly
+    dragon_display_by_id = {d["id"]: (d["x"], d["y"]) for d in dragon_spots}
+    # Targets linked to a dragon: exact dragon *display* location (no noise); others: add noise
+    targets_raw = snap.get("targets", [])
+    targets = []
+    for t in targets_raw:
+        ent = dict(t)
+        if "coordinates" in ent:
+            del ent["coordinates"]
+        linked_id = t.get("linked_dragon_spot_id")
+        if linked_id and linked_id in dragon_display_by_id:
+            x, y = dragon_display_by_id[linked_id]
+            ent["x"] = x
+            ent["y"] = y
+        else:
+            x, y = _coords(t)
+            dx, dy = _placement_offset(t.get("id", ""))
+            ent["x"] = x + dx
+            ent["y"] = y + dy
+        targets.append(ent)
 
     return {
         "grid": {"width": 55, "height": 30},
@@ -117,6 +154,13 @@ def _execute_tool(name: str, arguments: dict) -> str:
                 to_location_name=arguments["to_location_name"],
                 knight_name=arguments.get("knight_name"),
             )
+        if name == "add_knight":
+            return game.add_knight(
+                name=arguments.get("name", "Knight"),
+                location_name=arguments.get("location_name", "Castle"),
+            )
+        if name == "delete_knight":
+            return game.delete_knight(knight_id=arguments["knight_id"])
         if name == "create_dragon_spot":
             return game.create_dragon_spot(
                 location_name=arguments["location_name"],
@@ -207,14 +251,51 @@ def reset_session():
     return {"message": "Session reset."}
 
 
+def _ffmpeg_required_message() -> str:
+    return (
+        "ffmpeg is required for voice transcription but was not found. "
+        "Install it and ensure it is on PATH (e.g. on Linux/WSL: sudo apt install ffmpeg), "
+        "or place ffmpeg in offline/vendor/ffmpeg/ (see offline/README.md)."
+    )
+
+
+def _resolve_ffmpeg() -> str | None:
+    """Return path to ffmpeg: env FFMPEG_PATH, then system PATH, then bundled offline/vendor/ffmpeg.
+    On Linux (e.g. WSL) we prefer system ffmpeg so it can read Linux temp paths; bundled .exe cannot."""
+    if os.environ.get("FFMPEG_PATH"):
+        p = Path(os.environ["FFMPEG_PATH"])
+        if p.is_file():
+            return str(p)
+        for name in ("ffmpeg.exe", "ffmpeg"):
+            if (p / name).is_file():
+                return str(p / name)
+        return None
+    # Prefer system ffmpeg on non-Windows so temp file paths (e.g. /tmp/...) are readable by the binary
+    if sys.platform != "win32":
+        system_ffmpeg = shutil.which("ffmpeg")
+        if system_ffmpeg:
+            return system_ffmpeg
+    project_root = Path(__file__).resolve().parent.parent
+    bundled_dir = project_root / "offline" / "vendor" / "ffmpeg"
+    # On Windows check .exe first; on Linux only use "ffmpeg" (Windows .exe cannot read Linux paths)
+    names = ("ffmpeg.exe", "ffmpeg") if sys.platform == "win32" else ("ffmpeg",)
+    for name in names:
+        candidate = bundled_dir / name
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("ffmpeg")
+
+
 @app.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
     """Accept an audio file (e.g. webm/wav); return transcribed text. Needs 16kHz mono for best results."""
+    ffmpeg_cmd = _resolve_ffmpeg()
+    if not ffmpeg_cmd:
+        raise HTTPException(status_code=503, detail=_ffmpeg_required_message())
     try:
         contents = await file.read()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
-    upload_size = len(contents)
     if not contents:
         return {"text": ""}
     suffix = Path(file.filename or "audio").suffix or ".webm"
@@ -224,7 +305,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     try:
         proc = subprocess.run(
             [
-                "ffmpeg", "-y", "-i", tmp_path,
+                ffmpeg_cmd, "-y", "-i", tmp_path,
                 "-ar", "16000", "-ac", "1", "-f", "s16le",
                 "pipe:1",
             ],
@@ -237,6 +318,10 @@ async def transcribe_audio(file: UploadFile = File(...)):
         from audio_listener import transcribe_audio_bytes
         text = transcribe_audio_bytes(raw)
         return {"text": text or ""}
+    except FileNotFoundError:
+        raise HTTPException(status_code=503, detail=_ffmpeg_required_message())
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -244,6 +329,78 @@ async def transcribe_audio(file: UploadFile = File(...)):
             os.unlink(tmp_path)
         except Exception:
             pass
+
+
+# Tool names and param order for parsing "func(arg1, arg2)"-style fallback
+_TOOL_PARAM_ORDER: dict[str, list[str]] = {
+    "move_knight": ["to_location_name", "knight_name"],
+    "add_knight": ["name", "location_name"],
+    "create_dragon_spot": ["location_name", "dragon_type"],
+    "create_target": ["location_name", "linked_dragon_spot_id"],
+    "attack_target": ["target_id", "attack_method"],
+    "delete_target": ["target_id"],
+    "delete_dragon_spot": ["dragon_spot_id"],
+}
+
+
+def _parse_simple_args(s: str) -> list[str]:
+    """Split by comma, strip quotes. Handles 'Village', \"North Ridge\", etc."""
+    parts: list[str] = []
+    current: list[str] = []
+    in_quote: str | None = None
+    for c in s.strip():
+        if c in ("'", '"') and (in_quote is None or in_quote == c):
+            in_quote = None if in_quote else c
+        elif in_quote is None and c == ",":
+            parts.append("".join(current).strip().strip("'\""))
+            current = []
+        else:
+            current.append(c)
+    if current:
+        parts.append("".join(current).strip().strip("'\""))
+    return parts
+
+
+def _parse_tool_calls_from_content(content: str) -> list[tuple[str, dict]]:
+    """Fallback: parse tool calls from model text. Handles:
+    1) <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+    2) create_target(Village) or move_knight("North Ridge", "Sir Roland") style."""
+    out: list[tuple[str, dict]] = []
+    if not content:
+        return out
+    # 1) JSON inside <tool_call>...</tool_call>
+    for m in re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", content, re.DOTALL):
+        raw = m.group(1).strip()
+        if raw.startswith("{{") and raw.endswith("}}"):
+            raw = raw[1:-1]
+        try:
+            obj = json.loads(raw)
+            name = obj.get("name") or (obj.get("function") or {}).get("name")
+            args = obj.get("arguments") or (obj.get("function") or {}).get("arguments") or {}
+            if isinstance(args, str):
+                args = json.loads(args) if args.strip() else {}
+            if name:
+                out.append((name, args))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    if out:
+        return out
+    # 2) func(arg1, arg2) style (e.g. create_target(Village))
+    for name, param_names in _TOOL_PARAM_ORDER.items():
+        # Match name( ... ) with any content inside parens
+        pattern = re.escape(name) + r"\s*\(\s*([^)]*)\s*\)"
+        for m in re.finditer(pattern, content, re.IGNORECASE):
+            args_str = m.group(1).strip()
+            if not args_str:
+                continue
+            parts = _parse_simple_args(args_str)
+            args = {}
+            for i, p in enumerate(param_names):
+                if i < len(parts) and parts[i]:
+                    args[p] = parts[i]
+            if args:
+                out.append((name, args))
+    return out
 
 
 @app.post("/chat")
@@ -284,5 +441,10 @@ async def chat(body: ChatBody):
             args = {}
         result = _execute_tool(name, args)
         tool_results.append({"tool": name, "arguments": args, "result": result})
+    # Fallback: if no structured tool_calls, parse <tool_call>...</tool_call> from content
     content = getattr(msg, "content", None) or ""
+    if not tool_results and content:
+        for name, args in _parse_tool_calls_from_content(content):
+            result = _execute_tool(name, args)
+            tool_results.append({"tool": name, "arguments": args, "result": result})
     return {"content": content.strip(), "tool_results": tool_results}

@@ -20,6 +20,21 @@ frontend/dist/
 *.log
 debug.log
 
+# Offline bundle (large downloads; regenerate with download_bundle.sh)
+# Covers: wheels/, whisper_models/, llm_models/, npm_cache/, .venv/, .venv_download/, ffmpeg/
+offline/vendor/
+
+# Model files (safety if placed outside vendor)
+*.gguf
+
+# Local offline overrides (copy from offline_config.env.example)
+offline/offline_config.env
+
+# Scratch / temp files
+temp.txt
+temp*.tmp
+=*
+
 # OS
 .DS_Store
 Thumbs.db

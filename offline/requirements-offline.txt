@@ -1,0 +1,27 @@
+# Combined requirements for offline bundle (root + backend + LLM server).
+# Install with: pip install --no-index --find-links vendor/wheels -r requirements-offline.txt
+
+# Build deps (needed when installing sdists from offline wheels)
+wheel
+setuptools
+# For llama-cpp-python (and other scikit-build-core projects) when built from sdist
+scikit-build-core>=0.9.2
+pyproject-metadata
+cmake>=3.21
+ninja>=1.5
+
+# From project root requirements.txt
+openai>=1.0.0
+faster-whisper>=1.0.0
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.14
+colorama>=0.4.6
+numpy>=1.24.0
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+pydub>=0.25.0
+python-multipart>=0.0.6
+
+# LLM server (OpenAI-compatible, runs the GGUF model)
+llama-cpp-python[server]>=0.2.0

@@ -92,3 +92,15 @@ Open `http://localhost:5173`. Put assets in `frontend/public/assets/`: `map.png`
 | `frontend/` | Vite + React + Tailwind + Framer Motion; 55×30 grid overlay, entities by (x,y), context menus, poll every 500ms. |
 
 Voice/orchestrator: run `python main.py` (no `--api`) in another terminal for the PTT UI. To have voice control update the web map, the orchestrator must call the API (e.g. `POST /move_knight`) instead of a local `GameMap`.
+
+---
+
+## Offline / airgapped run
+
+To run the demo on a machine **without internet**, use the offline bundle: all models (Whisper + GGUF), Python wheels, and npm dependencies are downloaded into one folder, then copied to the airgapped PC.
+
+1. **On an online machine:** run `./offline/download_bundle.sh` (downloads everything into `offline/vendor/`).
+2. Copy the full project (including `offline/vendor/` and `frontend/node_modules`) to the airgapped PC.
+3. **On the airgapped PC:** run `./offline/install_offline.sh`, then `./offline/run_all.sh`.
+
+The LLM runs via **llama-cpp-python** (OpenAI-compatible server) using the bundled GGUF. See **`offline/README.md`** and **`offline/CONFIG.md`** for details and for **where to change the LLM or Whisper model**.

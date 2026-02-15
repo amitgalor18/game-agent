@@ -219,13 +219,14 @@ You must respond by calling exactly one of the available tools with the correct 
 You will be given the current game state with entity ids. You MUST use those exact ids—never invent or guess ids.
 - move_knight(to_location_name, knight_name optional): use a location name from the list (North Ridge, Castle, River Crossing, Forest Edge, Mountain Pass, Village, Tower, Bridge).
 - create_dragon_spot(location_name, dragon_type)
-- create_target(location_name optional, linked_dragon_spot_id optional): to link to a dragon, use its id from the state; then omit location_name (target gets that spot's location).
-- attack_target(target_id, attack_method): target_id can be a target id OR a dragon_spot id (e.g. when user says "attack the dragon" use the dragon spot id from the state). If attack_method is "knight", only call when a knight is at the same location as the target (otherwise use "artillery" or ask to move the knight first). Attack with knight can also hint at the desired target when no description is provided.
+- create_target(location_name optional, linked_dragon_spot_id optional): to link to a dragon, use its id from the state; then omit location_name (target gets that spot's location). Pick the linked dragon by the type of dragon mentioned in the user's command.
+- attack_target(target_id, attack_method): target_id can be a target id OR a dragon_spot id (e.g. when user says "attack the dragon" use the dragon spot id from the state). If attack_method is "knight", only call when a knight is at the same location as the target (otherwise use "artillery" or ask to move the knight first). Attack with knight can also hint at the desired target when no description is provided, if the knight is at the same location as one of the targets, it will attack that target.
 - delete_target(target_id)
 - delete_dragon_spot(dragon_spot_id)
 
-When the user says "target for blue dragon" or similar, find the dragon spot with that type in the state and use its id for linked_dragon_spot_id. When they say "attack the dragon" or "attack the blue dragon", use the dragon spot id as target_id (the game will resolve to the linked target).
-Keep responses short. Prefer tool calls over long text."""
+When the user says "create target for silver dragon" or similar, find the dragon spot with that type in the state and use its id for linked_dragon_spot_id. When they say "attack the dragon" or "attack the blue dragon", use the dragon spot id as target_id (the game will resolve to the linked target).
+Keep responses short. Prefer tool calls over long text.
+respond with exactly one tool call using the <tool_call> JSON format: <tool_call>...</tool_call>"""
 
 
 def format_state_for_llm(snapshot: dict) -> str:

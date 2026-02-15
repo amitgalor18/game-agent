@@ -1,0 +1,6 @@
+# Keep shell scripts and env files with LF so bash works in WSL/Git Bash (no \r errors)
+*.sh text eol=lf
+offline/*.sh text eol=lf
+*.env text eol=lf
+offline/*.env text eol=lf
+offline/*.env.example text eol=lf

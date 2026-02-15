@@ -14,13 +14,13 @@ from typing import Any
 # ---------------------------------------------------------------------------
 LOCATIONS: dict[str, tuple[int, int]] = {
     "North Ridge": (30, 8),
-    "Castle": (30, 16),
-    "River Crossing": (42, 24),
+    "Castle": (28, 16),
+    "River Crossing": (37, 23),
     "Forest Edge": (8, 14),
     "Mountain Pass": (52, 8),
-    "Village": (50, 26),
+    "Village": (44, 24),
     "Tower": (14, 26),
-    "Bridge": (42, 16),
+    "Bridge": (38, 14),
 }
 
 

@@ -34,6 +34,16 @@ export async function deleteKnight(id) {
   return res.json();
 }
 
+export async function createDragonSpot(location_name, dragon_type = 'fire') {
+  const res = await fetch(`${API_BASE}/create_dragon_spot`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ location_name, dragon_type }),
+  });
+  if (!res.ok) throw new Error(res.statusText);
+  return res.json();
+}
+
 export async function createTarget(location_name = null, linked_dragon_spot_id = null) {
   const res = await fetch(`${API_BASE}/create_target`, {
     method: 'POST',

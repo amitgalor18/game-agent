@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   fetchState,
   addKnight,
+  createDragonSpot,
   createTarget,
   deleteKnight,
   deleteTarget,
@@ -129,7 +130,7 @@ function KnightMarker({ knight, blockPctX, blockPctY, onClick }) {
         left: `${blockPctX(knight.x)}%`,
         top: `${blockPctY(knight.y)}%`,
       }}
-      transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+      transition={{ duration: 2, ease: 'easeInOut' }}
       className="absolute w-8 h-8 -ml-4 -mt-4 cursor-pointer z-10 select-none"
       style={{ pointerEvents: 'auto' }}
       onClick={onClick}
@@ -515,6 +516,10 @@ export default function App() {
         {
           label: `Spawn Knight at ${location.name}`,
           action: () => addKnight(location.name).then(loadState),
+        },
+        {
+          label: `Spawn Dragon at ${location.name}`,
+          action: () => createDragonSpot(location.name).then(loadState),
         },
         {
           label: `Spawn Target at ${location.name}`,
