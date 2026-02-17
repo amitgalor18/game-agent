@@ -55,12 +55,13 @@ function MapView({ state, onMapClick, onEntityClick, fireBreathAtLocation }) {
   const blockPctY = (v) => (v / h) * 100
 
   return (
-    <div className="relative w-full max-w-4xl aspect-[55/30] bg-stone-800 rounded-lg overflow-hidden">
-      {/* Background map image */}
-      <div
-        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
-        style={{ backgroundImage: 'url(/assets/map.png)' }}
-      />
+    <div className="flex-1 min-h-0 flex items-center justify-center">
+      <div className="relative h-full max-w-full aspect-[55/30] bg-stone-800 rounded-lg overflow-hidden">
+        {/* Background map image */}
+        <div
+          className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+          style={{ backgroundImage: 'url(/assets/map.png)' }}
+        />
       {/* Semi-transparent grid */}
       <div
         className="absolute inset-0 opacity-30 pointer-events-none"
@@ -145,6 +146,7 @@ function MapView({ state, onMapClick, onEntityClick, fireBreathAtLocation }) {
           <img src="/assets/fire-breath.gif" alt="" className="w-full h-full object-contain" />
         </motion.div>
       )}
+      </div>
     </div>
   )
 }
@@ -160,7 +162,7 @@ function KnightMarker({ knight, blockPctX, blockPctY, onClick }) {
         top: `${blockPctY(knight.y)}%`,
       }}
       transition={{ duration: 2, ease: 'easeInOut' }}
-      className="absolute w-8 h-8 -ml-4 -mt-4 cursor-pointer z-10 select-none"
+      className="absolute w-20 h-20 -ml-10 -mt-10 cursor-pointer z-10 select-none"
       style={{ pointerEvents: 'auto' }}
       onClick={onClick}
     >
@@ -184,7 +186,7 @@ function DragonMarker({ dragon, blockPctX, blockPctY, onClick }) {
         left: `${blockPctX(dragon.x)}%`,
         top: `${blockPctY(dragon.y)}%`,
       }}
-      className="absolute w-8 h-8 -ml-4 -mt-4 cursor-pointer z-10 select-none"
+      className="absolute w-20 h-20 -ml-10 -mt-10 cursor-pointer z-10 select-none"
       style={{ pointerEvents: 'auto' }}
       onClick={onClick}
     >
@@ -220,7 +222,7 @@ function TargetMarker({ target, blockPctX, blockPctY, onClick }) {
         left: `${blockPctX(target.x)}%`,
         top: `${blockPctY(target.y)}%`,
       }}
-      className="absolute w-8 h-8 -ml-4 -mt-4 cursor-pointer z-10 select-none"
+      className="absolute w-20 h-20 -ml-10 -mt-10 cursor-pointer z-10 select-none"
       style={{ pointerEvents: 'auto' }}
       onClick={onClick}
     >
@@ -255,7 +257,7 @@ function TrebuchetMarker({ trebuchet, blockPctX, blockPctY }) {
         left: `${blockPctX(trebuchet.x)}%`,
         top: `${blockPctY(trebuchet.y)}%`,
       }}
-      className="absolute w-8 h-8 -ml-4 -mt-4 z-10 select-none pointer-events-none"
+      className="absolute w-20 h-20 -ml-10 -mt-10 select-none pointer-events-none"
       title={`Trebuchet at ${trebuchet.location}`}
     >
       <img
@@ -446,20 +448,23 @@ function StateTables({ state, activeTab, onTabChange }) {
 }
 
 function TurnLog({ turnLogs = [] }) {
-  const endRef = useRef(null)
+  const scrollContainerRef = useRef(null)
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = scrollContainerRef.current
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [turnLogs.length])
   return (
     <div className="flex flex-col gap-1 min-h-0">
       <label className="text-xs font-medium text-stone-400">Turn log</label>
-      <div className="flex-1 min-h-[80px] max-h-32 overflow-y-auto rounded border border-stone-600 bg-stone-900 px-2 py-1.5 text-xs text-stone-300 font-mono">
+      <div
+        ref={scrollContainerRef}
+        className="flex-1 min-h-[80px] max-h-32 overflow-y-auto rounded border border-stone-600 bg-stone-900 px-2 py-1.5 text-xs text-stone-300 font-mono"
+      >
         {turnLogs.length === 0 ? (
           <span className="text-stone-500">(no events yet)</span>
         ) : (
           turnLogs.map((line, i) => <div key={i}>{line}</div>)
         )}
-        <div ref={endRef} />
       </div>
     </div>
   )
@@ -541,6 +546,7 @@ export default function App() {
   const musicIndexRef = useRef(0)
   const gameActiveRef = useRef(false)
   const musicMutedRef = useRef(false)
+  const musicPausedForRecordingRef = useRef(false)
   const sfxRef = useRef(null)
 
   const loadState = useCallback(async () => {
@@ -649,7 +655,24 @@ export default function App() {
 
   const startRecording = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // Pause music during recording: Chrome/Windows often degrades mic capture when
+      // browser is simultaneously playing audio (known issue). Resume in onstop.
+      if (musicRef.current && !musicMutedRef.current && gameActiveRef.current) {
+        musicRef.current.pause()
+        musicPausedForRecordingRef.current = true
+      }
+      let stream
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            autoGainControl: false,
+            noiseSuppression: false,
+          },
+        })
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      }
       const recorder = new MediaRecorder(stream)
       chunksRef.current = []
       recorder.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data) }
@@ -692,6 +715,11 @@ export default function App() {
     recorderRef.current.stop()
     recorderRef.current = null
     setIsRecording(false)
+    // Resume music as soon as recording stops (not after LLM), so only capture is muted
+    if (musicPausedForRecordingRef.current && musicRef.current && !musicMutedRef.current && gameActiveRef.current) {
+      musicRef.current.play().catch(() => {})
+    }
+    musicPausedForRecordingRef.current = false
   }, [])
 
   const handleMapClick = (location, screenPos) => {
